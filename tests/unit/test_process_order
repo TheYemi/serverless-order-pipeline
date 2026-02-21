@@ -1,0 +1,51 @@
+import json
+import pytest
+from unittest.mock import Mock, patch
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src/lambda/process-order'))
+
+import index
+
+@pytest.fixture
+def sqs_event():
+    """Mock SQS event"""
+    return {
+        'Records': [{
+            'body': json.dumps({
+                'order_id': 'TEST_001',
+                'customer_id': 'CUST_123',
+                'total': 99.99
+            })
+        }]
+    }
+
+@pytest.fixture
+def lambda_context():
+    context = Mock()
+    context.request_id = 'test-request-id'
+    return context
+
+@patch.dict(os.environ, {
+    'DYNAMODB_TABLE': 'test-orders',
+    'SNS_TOPIC_ARN': 'arn:aws:sns:us-east-1:123:test-topic'
+})
+@patch('index.dynamodb')
+@patch('index.sns')
+@patch('index.time.sleep')
+def test_process_order_success(mock_sleep, mock_sns, mock_dynamodb, sqs_event, lambda_context):
+    """Test successful order processing"""
+    
+    mock_table = Mock()
+    mock_dynamodb.Table.return_value = mock_table
+    
+    index.lambda_handler(sqs_event, lambda_context)
+    
+    mock_table.update_item.assert_called_once()
+    
+    mock_sns.publish.assert_called_once()
+    call_args = mock_sns.publish.call_args[1]
+    assert 'TEST_001' in call_args['Subject']
+    
+    assert mock_sleep.call_count == 3  # inventory, fraud, payment
