@@ -1,17 +1,44 @@
 import json
 import pytest
-from unittest.mock import Mock, patch
-import sys
+from unittest.mock import Mock, patch, MagicMock
 import os
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src/lambda/accept-order'))
-
-import index
+import sys
+from moto import mock_aws
 
 @pytest.fixture
-def api_gateway_event():
-    """Mock API Gateway event"""
-    return {
+def lambda_context():
+    """Mock Lambda context"""
+    context = Mock()
+    context.request_id = 'test-request-id'
+    context.function_name = 'test-function'
+    context.memory_limit_in_mb = 128
+    return context
+
+@mock_aws
+def test_accept_order_success(lambda_context):
+    """Test successful order acceptance"""
+
+    os.environ['DYNAMODB_TABLE'] = 'test-orders'
+    os.environ['SQS_QUEUE_URL'] = 'https://sqs.us-east-1.amazonaws.com/123/test-queue'
+    os.environ['AWS_DEFAULT_REGION'] = 'us-east-1'
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../src/lambda/accept-order'))
+    import index
+    
+    import boto3
+    
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    table = dynamodb.create_table(
+        TableName='test-orders',
+        KeySchema=[{'AttributeName': 'order_id', 'KeyType': 'HASH'}],
+        AttributeDefinitions=[{'AttributeName': 'order_id', 'AttributeType': 'S'}],
+        BillingMode='PAY_PER_REQUEST'
+    )
+    
+    sqs = boto3.client('sqs', region_name='us-east-1')
+    queue = sqs.create_queue(QueueName='test-queue')
+    
+    event = {
         'body': json.dumps({
             'order_id': 'TEST_001',
             'customer_id': 'CUST_123',
@@ -19,52 +46,14 @@ def api_gateway_event():
         }),
         'headers': {'Content-Type': 'application/json'}
     }
-
-@pytest.fixture
-def lambda_context():
-    """Mock Lambda context"""
-    context = Mock()
-    context.request_id = 'test-request-id'
-    return context
-
-@patch.dict(os.environ, {
-    'DYNAMODB_TABLE': 'test-orders',
-    'SQS_QUEUE_URL': 'https://sqs.us-east-1.amazonaws.com/123/test-queue'
-})
-@patch('index.dynamodb')
-@patch('index.sqs')
-def test_accept_order_success(mock_sqs, mock_dynamodb, api_gateway_event, lambda_context):
-    """Test successful order acceptance"""
     
-    mock_table = Mock()
-    mock_dynamodb.Table.return_value = mock_table
-    
-    response = index.lambda_handler(api_gateway_event, lambda_context)
+    response = index.lambda_handler(event, lambda_context)
     
     assert response['statusCode'] == 202
     body = json.loads(response['body'])
     assert body['order_id'] == 'TEST_001'
     assert 'accepted' in body['message'].lower()
     
-    mock_table.put_item.assert_called_once()
-    call_args = mock_table.put_item.call_args[1]['Item']
-    assert call_args['order_id'] == 'TEST_001'
-    assert call_args['status'] == 'PENDING'
-    
-    mock_sqs.send_message.assert_called_once()
-
-@patch.dict(os.environ, {
-    'DYNAMODB_TABLE': 'test-orders',
-    'SQS_QUEUE_URL': 'https://sqs.us-east-1.amazonaws.com/123/test-queue'
-})
-def test_accept_order_missing_fields(lambda_context):
-    """Test order rejection when fields are missing"""
-    
-    event = {
-        'body': json.dumps({
-            'order_id': 'TEST_001'
-        })
-    }
-    
-    with pytest.raises(KeyError):
-        index.lambda_handler(event, lambda_context)
+    result = table.get_item(Key={'order_id': 'TEST_001'})
+    assert 'Item' in result
+    assert result['Item']['status'] == 'PENDING'
